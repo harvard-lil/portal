@@ -1,8 +1,8 @@
 {
-  "name": "@leppert/portal",
+  "name": "@harvard-lil/portal",
   "version": "0.0.1",
   "description": "Proxy",
-  "homepage": "https://github.com/leppert/portal#readme",
+  "homepage": "https://github.com/harvard-lil/portal#readme",
   "author": "Harvard Library Innovation Lab",
   "license": "MIT",
   "main": "Portal.js",
@@ -17,10 +17,10 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/leppert/portal.git"
+    "url": "git+https://github.com/harvard-lil/portal.git"
   },
   "bugs": {
-    "url": "https://github.com/leppert/portal/issues"
+    "url": "https://github.com/harvard-lil/portal/issues"
   },
   "dependencies": {
   },
