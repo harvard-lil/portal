@@ -1,0 +1,31 @@
+{
+  "name": "@leppert/portal",
+  "version": "0.0.1",
+  "description": "Proxy",
+  "main": "Portal.js",
+  "type": "module",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "scripts": {
+    "lint": "standard",
+    "lint-autofix": "standard --fix",
+    "test": "node --test",
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/leppert/portal.git"
+  },
+  "author": "Harvard Library Innovation Lab",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/leppert/portal/issues"
+  },
+  "homepage": "https://github.com/leppert/portal#readme",
+  "dependencies": {
+  },
+  "devDependencies": {
+    "express": "^4.18.2",
+    "standard": "*"
+  }
+}
