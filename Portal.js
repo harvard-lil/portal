@@ -11,6 +11,14 @@ const CRLF = '\r\n'
 const httpAgent = new http.Agent({ keepAlive: true })
 const httpsAgent = new https.Agent({ keepAlive: true })
 
+const proxyDefaults = {
+  requestTransformer: (_request) => new PassThrough(),
+  responseTransformer: (_response, _request) => new PassThrough(),
+  clientOptions: (_request) => { return {} },
+  serverOptions: (_request) => { return {} },
+  keepAlive: true
+}
+
 const clientDefaults = {
   rejectUnauthorized: false,
   requestCert: false,
@@ -30,14 +38,6 @@ const clientDefaults = {
     'A0cAMEQCIH/3IPGNTbCQnr1F1x0r28BtwkhMZPLRSlm7p0uXDv9pAiBi4JQKEwlY\n' +
     '6sWzsJyD3vMMAyP9UZm0WJhtcOb6F0wRpg==\n' +
     '-----END CERTIFICATE-----'
-}
-
-const defaults = {
-  requestTransformer: (_request) => new PassThrough(),
-  responseTransformer: (_response, _request) => new PassThrough(),
-  clientOptions: (_request) => { return {} },
-  serverOptions: (_request) => { return {} },
-  keepAlive: true
 }
 
 function initializeMirror (socket) {
@@ -187,8 +187,11 @@ function getHandler (proxy, clientOptions, serverOptions, requestTransformer, re
   }
 }
 
+
+/**
+ * Removes any remaining sockets still open due to keep-alive
+ */
 function closeHandler () {
-  // clean up any remaining serverSocket keep-alive connections
   httpAgent.destroy()
   httpsAgent.destroy()
 }
@@ -213,7 +216,7 @@ export function createServer (options) {
     clientOptions,
     serverOptions,
     ...passalongOptions
-  } = { ...defaults, ...options }
+  } = { ...proxyDefaults, ...options }
 
   const proxy = http.createServer(passalongOptions)
   const handler = getHandler(proxy, clientOptions, serverOptions, requestTransformer, responseTransformer)
