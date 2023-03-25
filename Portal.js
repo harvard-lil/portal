@@ -29,16 +29,19 @@ const defaults = {
   requestTransformer: (_request) => new PassThrough(),
   responseTransformer: (_response, _request) => new PassThrough(),
   clientOptions: (_request) => { return {} },
-  serverOptions: (_request) => { return {} }
+  serverOptions: (_request) => { return {} },
+  keepAlive: true
 }
 
-function assignMirror (socket) {
+function initializeMirror (socket) {
   if (!socket.mirror) {
-    // Increase max listeners, primarily for the client socket, as there will be a lot of concurrent requests
-    // TODO: confirm that we don't have a memory leak by removing this and tracing through MaxListenersExceededWarning(s)
-    socket.setMaxListeners(100)
     socket.mirror = new PassThrough()
     socket.pipe(socket.mirror)
+  } else {
+    // Sockets are reused for subsequent requests, so previous pipes must be cleared.
+    // Failure to do so will cause the wrong request object to be passed to the transformers
+    socket.mirror.unpipe()
+    socket.mirror.transformer?.unpipe()
   }
 }
 
@@ -67,70 +70,130 @@ function getServerDefaults (request) {
   }
 }
 
-const CRLFx2 = '\r\n\r\n'
+const CRLF = '\r\n'
 
-function getHandler (proxy, clientOptions, serverOptions, requestTransformer, responseTransformer) {
-  return async (request, _, head) => {
-    const { socket: clientSocket } = request
+function releaseSocket (req) {
+  const { socket } = req
 
-    // Sockets are reused for subsequent requests, so previous pipes must be cleared.
-    // Failure to do so will cause the wrong request object to be passed to the transformers
-    clientSocket.mirror.unpipe()
+  /**
+   * A listener must be present or the socket will be closed
+   * @see {@link https://nodejs.org/api/http.html#event-upgrade}
+   * @see {@link https://github.com/nodejs/node/blob/c5881458106487f80d31513096b4d0baa88828b8/lib/_http_client.js#L564}
+   */
+  req.on('upgrade', () => {})
 
-    const customOptions = await serverOptions(request)
-    const options = { ...getServerDefaults(request), ...customOptions }
+  /**
+   * emit a fake switching response to trigger the
+   * release of the socket and parser from the request
+   * NOTE: the `Upgrade` and `Connection` headers are required for the parser to flip the `upgrade` flag
+   * @see {@link https://github.com/nodejs/node/blob/c5881458106487f80d31513096b4d0baa88828b8/lib/_http_client.js#L545}
+   */
+  socket.emit('data', Buffer.from([
+    'HTTP/1.1 101 Switching Protocols',
+    'Upgrade: shim',
+    'Connection: Upgrade',
+    CRLF
+  ].join(CRLF)))
+
+  /**
+   * The upgrade logic also removes the socket from the agent pool
+   * with the idea that you'll have a long-running websocket attached
+   * so we must add it back to the pool by temporarily patching createConnection.
+   * Despite the name, `createSocket` does not create the socket, it defers to `createConnection` for that.
+   * Instead, it attaches listeners and inserts the socket into the pool so we're forcing
+   * `createConnection` to just return the socket we already have.
+   * @see {@link https://github.com/nodejs/node/blob/c5881458106487f80d31513096b4d0baa88828b8/lib/_http_client.js#L568}
+   * @see {@link https://github.com/nodejs/node/blob/c5881458106487f80d31513096b4d0baa88828b8/lib/_http_agent.js#L311}
+   * @see {@link https://github.com/nodejs/node/blob/c5881458106487f80d31513096b4d0baa88828b8/lib/_http_agent.js#L334}
+   */
+  const createConnection = req.agent.createConnection
+  try {
+    req.agent.createConnection = (...args) => args[0]?.socket
+      ? args[0].socket
+      : createConnection(...args)
+    req.agent.createSocket(null, { socket, servername: 'bypass' }, () => {})
+  } finally {
+    req.agent.createConnection = createConnection
+  }
+}
+
+async function getServerRequest (clientRequest, serverOptions) {
+    const customOptions = await serverOptions(clientRequest)
+    const options = { ...getServerDefaults(clientRequest), ...customOptions }
 
     const httpModule = options.agent === httpsAgent ? https : http
+    return httpModule.request(options)
+}
 
-    httpModule
-      .request(options)
+function getHandler (proxy, clientOptions, serverOptions, requestTransformer, responseTransformer) {
+  return async (clientRequest, _, head) => {
+    const { socket: clientSocket } = clientRequest
+    initializeMirror(clientSocket)
+
+    const serverRequest = await getServerRequest(clientRequest, serverOptions)
+
+    serverRequest
+      .on('error', err => proxy.emit('error', err, serverRequest, clientRequest))
       .on('socket', async serverSocket => {
-        assignMirror(serverSocket)
-        proxy.on('close', () => serverSocket.destroy())
+        initializeMirror(serverSocket)
 
-        serverSocket.on('connect', async () => {
-          proxy.emit('connected', serverSocket, request)
+        const onConnect = async () => {
+          proxy.emit('connected', serverSocket, clientRequest)
           if (serverSocket.destroyed) return // serverSocket may be destroyed via a 'connected' event listener
-
-          if (request.method === CONNECT) {
+          if (clientRequest.method === CONNECT) {
             // Replace old net.Socket with new tls.Socket and attach parser and event listeners
             // @see {@link https://nodejs.org/api/http.html#event-connection}
-            const options = await clientOptions(request)
+            const options = await clientOptions(clientRequest)
             proxy.emit('connection', new TLSSocket(clientSocket, { ...clientDefaults, ...options, isServer: true }))
 
-            // Letting client know we've made the connection @see {@link https://reqbin.com/Article/HttpConnect}
-            // TODO: CONNECT is hop-by-hop and we should handle additional hops down the line
-            clientSocket.write('HTTP/1.1 200 Connection Established' + CRLFx2)
+            // Let the client know we've made the connection @see {@link https://reqbin.com/Article/HttpConnect}
+            clientSocket.write(['HTTP/1.1 200 Connection Established', CRLF].join(CRLF))
             serverSocket.write(head)
+            releaseSocket(serverRequest)
           } else {
-            clientSocket.mirror.pipe(requestTransformer(request)).pipe(serverSocket)
+            clientSocket.mirror.transformer = requestTransformer(clientRequest)
+            clientSocket.mirror.pipe(clientSocket.mirror.transformer).pipe(serverSocket, { end: false })
           }
-        })
+        }
+
+        if (serverRequest.reusedSocket) await onConnect()
+        else serverSocket.on('connect', onConnect)
       })
-      .on('response', (response) => {
-        // On response, forward the original server response on to the client
-        response.socket.mirror.pipe(responseTransformer(response, request)).pipe(request.socket)
+      .on('response', (serverResponse) => {
+        const { socket: serverSocket } = serverResponse
+
+        /**
+         * Must be called to release the socket back into the agent pool.
+         * Needed since we never call `req.end()` and instead just pipe data through the socket.
+         * Node's `res.on('end')` handler will set `req._ended = true` which the
+         * `req.on('finish')` handler uses to determine whether to send the socket back to the pool.
+         * @see {@link https://github.com/nodejs/node/blob/c5881458106487f80d31513096b4d0baa88828b8/lib/_http_client.js#L748}
+         * @see {@link https://github.com/nodejs/node/blob/c5881458106487f80d31513096b4d0baa88828b8/lib/_http_client.js#L786}
+         */
+        serverResponse.on('end', () => serverResponse.req.emit('finish'))
+
+        // On response, forward the original server response on to the client.
+        // TODO: figure out why clientSocket doesn't play well with backpressure hence the need for on('data') instead of pipe
+        serverSocket.mirror.transformer = responseTransformer(serverResponse, clientRequest)
+        serverSocket.mirror.pipe(serverSocket.mirror.transformer).on('data', data => clientSocket.write(data))
 
         // Emit a response event on the http.Server instance to allow a similar interface as server.on('request')
-        proxy.emit('response', response, request)
+        proxy.emit('response', serverResponse, clientRequest)
 
         // response must be fully consumed else response.socket listeners won't get all of the chunks.
         // @see {@link https://nodejs.org/api/http.html#class-httpclientrequest}
-        response.resume()
-      })
-      .on('error', (err) => {
-        switch (err.code) {
-          case 'ETIMEDOUT':
-            clientSocket.write('HTTP/1.1 408 Request Timeout' + CRLFx2)
-            break
-          default:
-            clientSocket.write('HTTP/1.1 502 Bad Gateway' + CRLFx2)
-        }
+        serverResponse.resume()
       })
     // Ensure the entire request can be consumed. This isn't documented but is here
     // on the suspicion that it functions similarly to response, as documented above.
-    request.resume()
+    clientRequest.resume()
   }
+}
+
+function closeHandler () {
+  // clean up any remaining serverSocket keep-alive connections
+  httpAgent.destroy()
+  httpsAgent.destroy()
 }
 
 /**
@@ -159,9 +222,10 @@ export function createServer (options) {
   const handler = getHandler(proxy, clientOptions, serverOptions, requestTransformer, responseTransformer)
 
   proxy
-    .on('connection', assignMirror)
-    .on('request', handler)
+    .on('connection', initializeMirror)
     .on('connect', handler)
+    .on('request', handler)
+    .on('close', closeHandler)
 
   return proxy
 }
