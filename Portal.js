@@ -4,6 +4,13 @@ import { TLSSocket } from 'tls'
 import { URL } from 'url'
 import { PassThrough } from 'node:stream'
 
+const CONNECT = 'CONNECT'
+const UNKNOWN_PROTOCOL = 'unknown:'
+const CRLF = '\r\n'
+
+const httpAgent = new http.Agent({ keepAlive: true })
+const httpsAgent = new https.Agent({ keepAlive: true })
+
 const clientDefaults = {
   rejectUnauthorized: false,
   requestCert: false,
@@ -45,14 +52,6 @@ function initializeMirror (socket) {
   }
 }
 
-/**
- * Use http agents to keep sockets alive for greater efficiency
- */
-const httpAgent = new http.Agent({ keepAlive: true })
-const httpsAgent = new https.Agent({ keepAlive: true })
-const CONNECT = 'CONNECT'
-const UNKNOWN_PROTOCOL = 'unknown:'
-
 function getServerDefaults (request) {
   const url = new URL(
     request.method === CONNECT || request.url.startsWith('/')
@@ -69,8 +68,6 @@ function getServerDefaults (request) {
     agent: protocol === 'https:' ? httpsAgent : httpAgent
   }
 }
-
-const CRLF = '\r\n'
 
 function releaseSocket (req) {
   const { socket } = req
