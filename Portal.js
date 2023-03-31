@@ -100,7 +100,6 @@ function releaseSocket (req) {
    */
   req.on('upgrade', () => {})
 
-
   /**
    * emit a fake switching response to trigger the
    * release of the socket and parser from the request
@@ -191,7 +190,7 @@ function getRequestHandler (proxy, clientOptions, serverOptions, requestTransfor
       .on('socket', async serverSocket => {
         prepSocket(serverSocket, proxy)
 
-        const onConnect = async () => {
+        const onSocketConnect = async () => {
           proxy.emit('connected', serverSocket, clientRequest)
           if (serverSocket.destroyed) return // serverSocket may be destroyed via a 'connected' event listener
           if (clientRequest.method === CONNECT) {
@@ -210,11 +209,14 @@ function getRequestHandler (proxy, clientOptions, serverOptions, requestTransfor
           }
         }
 
-        if (serverRequest.reusedSocket) await onConnect()
-        else serverSocket.on('connect', onConnect)
+        if (serverRequest.reusedSocket) await onSocketConnect()
+        else serverSocket.on('connect', onSocketConnect)
       })
-      .on('upgrade', getResponseHandler('upgrade-client', proxy, clientRequest, responseTransformer))
-      .on('response', getResponseHandler('response', proxy, clientRequest, responseTransformer))
+      .on('upgrade',     getResponseHandler('upgrade-client', proxy, clientRequest, responseTransformer))
+      .on('connect',     getResponseHandler('connect',        proxy, clientRequest, responseTransformer))
+      .on('continue',    getResponseHandler('continue',       proxy, clientRequest, responseTransformer))
+      .on('information', getResponseHandler('information',    proxy, clientRequest, responseTransformer))
+      .on('response',    getResponseHandler('response',       proxy, clientRequest, responseTransformer))
     // Ensure the entire request can be consumed. This isn't documented but is here
     // on the suspicion that it functions similarly to response, as documented above.
     clientRequest.resume()
@@ -256,14 +258,17 @@ export function createServer (options) {
   } = { ...proxyDefaults, ...options }
 
   const proxy = http.createServer(passalongOptions)
+  const connectionHandler = getConnectionHandler(proxy)
   const requestHandler = getRequestHandler(proxy, clientOptions, serverOptions, requestTransformer, responseTransformer)
 
   proxy
-    .on('connection', getConnectionHandler(proxy))
-    .on('connect', requestHandler)
-    .on('upgrade', requestHandler)
-    .on('request', requestHandler)
-    .on('close', closeHandler)
+    .on('connection',       connectionHandler)
+    .on('close',            closeHandler)
+    .on('connect',          requestHandler)
+    .on('upgrade',          requestHandler)
+    .on('checkContinue',    requestHandler)
+    .on('checkExpectation', requestHandler)
+    .on('request',          requestHandler)
 
   return proxy
 }
