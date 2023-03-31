@@ -27,7 +27,13 @@ The entrypoint for Portal is the `createServer` function which, in addition to t
 
 ## Events
 
-The proxy server returned by `createServer` emits all of the events available on [`http.Server`](https://nodejs.org/api/http.html#class-httpserver) (ex: `proxy.on('request')`). Additionally, it emits all of the events from [`http.ClientRequest`](https://nodejs.org/api/http.html#class-httpclientrequest) (ex: `proxy.on('response')`) with the caveat that the `upgrade` event is emitted as `upgrade-client` in order to avoid a collision with the `http.Server` event of the same name. Errors from both `http.Server` and `http.ClientRequest` are available via the 'error' event.
+The proxy server returned by `createServer` emits:
+
+- All of the events available on [`http.Server`](https://nodejs.org/api/http.html#class-httpserver). Ex: `proxy.on('request', (request) => {})`
+- All of the events from [`http.ClientRequest`](https://nodejs.org/api/http.html#class-httpclientrequest). Ex: `proxy.on('response', (response, request) => {})`  
+  NOTE: The `upgrade` event is emitted as `upgrade-client` in order to avoid a collision with the `http.Server` event of the same name.
+- A `connected` event when a connection is made in response to an HTTP `CONNECT` request
+- `error` events from both `http.Server` and `http.ClientRequest`
 
 ## Example
 
