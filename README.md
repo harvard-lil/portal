@@ -1,4 +1,10 @@
-# Example
+# Portal
+
+> 🚧 Work-in-progress 
+
+HTTP proxy implementation using Node.js' [http.createServer](https://nodejs.org/api/http.html#httpcreateserveroptions-requestlistener), currently in use on [@harvard-lil/scoop](https://github.com/harvard-lil/scoop).
+
+## Example
 
 ```js
 import * as http from 'http'
