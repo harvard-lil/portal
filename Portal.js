@@ -169,7 +169,7 @@ function getResponseHandler (event, proxy, clientRequest, responseTransformer) {
 
     // On response, forward the original server response on to the client.
     // TODO: figure out why clientSocket doesn't play well with backpressure hence the need for on('data') instead of pipe
-    serverSocket.mirror.transformer = responseTransformer(serverResponse, clientRequest)
+    serverSocket.mirror.transformer = await responseTransformer(serverResponse, clientRequest)
     serverSocket.mirror.pipe(serverSocket.mirror.transformer).on('data', data => clientRequest.socket.write(data))
 
     // response must be fully consumed else response.socket listeners won't get all of the chunks.
@@ -204,7 +204,7 @@ function getRequestHandler (proxy, clientOptions, serverOptions, requestTransfor
             serverSocket.write(head)
             releaseSocket(serverRequest)
           } else {
-            clientSocket.mirror.transformer = requestTransformer(clientRequest)
+            clientSocket.mirror.transformer = await requestTransformer(clientRequest)
             clientSocket.mirror.pipe(clientSocket.mirror.transformer).pipe(serverSocket, { end: false })
           }
         }

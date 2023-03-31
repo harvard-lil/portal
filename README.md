@@ -6,6 +6,29 @@
 
 HTTP proxy implementation using Node.js' [http.createServer](https://nodejs.org/api/http.html#httpcreateserveroptions-requestlistener) to accept connections and [http(s).request](https://nodejs.org/api/http.html#httprequestoptions-callback) to relay them to their destinations. Currently in use on [@harvard-lil/scoop](https://github.com/harvard-lil/scoop).
 
+## Philosophy
+
+Portal uses standard Node.js networking components in order to provide a simple proxy with the following goals:
+
+- No dependencies
+- Interfaces that match existing Node.js conventions
+- The ability to intercept raw traffic
+
+Portal achieves this by using "mirror" streams that buffer the data from each socket, allowing Node.js' standard parsing mechanism to parse the data while making that same raw data available for modification before being passed forward in the proxy.
+
+## Configuration
+
+The entrypoint for Portal is the `createServer` function which, in addition to the options available to [`http.createServer`](https://nodejs.org/api/http.html#httpcreateserveroptions-requestlistener), also accepts the following:
+
+- `clientOptions(request)` - a function which accepts the request [`http.IncomingMessage`](https://nodejs.org/api/http.html#class-httpincomingmessage) and returns an options object (or `Promise`) to be passed to [`new tls.TLSSocket`](https://nodejs.org/api/tls.html#new-tlstlssocketsocket-options) when the client socket is upgraded after an HTTP `CONNECT` request. Most useful for dynamically generating a `key` / `cert` pair for the requested server name.
+- `serverOptions(request)` - a function which accepts the request [`http.IncomingMessage`](https://nodejs.org/api/http.html#class-httpincomingmessage) and returns an options object (or `Promise`) to be passed to [`http(s).request`](https://nodejs.org/api/http.html#httprequestoptions-callback) which will then be used to make requests to the destination. Most useful for setting SSL flags.
+- `requestTransformer(request)` - a function which accepts the request [`http.IncomingMessage`](https://nodejs.org/api/http.html#class-httpincomingmessage) and returns a [`stream.Transform`](https://nodejs.org/api/stream.html#class-streamtransform) instance (or `Promise`) through which the incoming request data will be passed before being forwarded to its destination.
+- `responseTransformer(response, request)` - a function which accepts the response and request [`http.IncomingMessages`](https://nodejs.org/api/http.html#class-httpincomingmessage) and returns a [`stream.Transform`](https://nodejs.org/api/stream.html#class-streamtransform) instance (or `Promise`) through which the incoming response data will be passed before being forwarded to its destination.
+
+## Events
+
+The proxy server returned by `createServer` emits all of the events available on [`http.Server`](https://nodejs.org/api/http.html#class-httpserver) (ex: `proxy.on('request')`). Additionally, it emits all of the events from [`http.ClientRequest`](https://nodejs.org/api/http.html#class-httpclientrequest) (ex: `proxy.on('response')`) with the caveat that the `upgrade` event is emitted as `upgrade-client` in order to avoid a collision with the `http.Server` event of the same name. Errors from both `http.Server` and `http.ClientRequest` are available via the 'error' event.
+
 ## Example
 
 ```js
@@ -49,6 +72,10 @@ proxy.on('request', (request) => {
 
 proxy.on('response', (response, request) => {
   console.log('Parsed response to observe', response.headers)
+})
+
+proxy.on('error', (err) => {
+  console.log('Handle error', err)
 })
 
 proxy.listen(PORT, HOST)
