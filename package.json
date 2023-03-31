@@ -1,7 +1,7 @@
 {
   "name": "@harvard-lil/portal",
   "version": "0.0.1",
-  "description": "Proxy",
+  "description": "HTTP proxy implementation using Node.js' http.createServer.",
   "homepage": "https://github.com/harvard-lil/portal#readme",
   "author": "Harvard Library Innovation Lab",
   "license": "MIT",
@@ -10,6 +10,11 @@
   "engines": {
     "node": ">=18.0.0"
   },
+  "files": [
+    "*.js",
+    "!__*.js",
+    "!*.test.js"
+  ],
   "scripts": {
     "lint": "standard",
     "lint-autofix": "standard --fix",
