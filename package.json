@@ -1,6 +1,6 @@
 {
   "name": "@harvard-lil/portal",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "HTTP proxy implementation using Node.js' http.createServer.",
   "homepage": "https://github.com/harvard-lil/portal#readme",
   "author": "Harvard Library Innovation Lab",
@@ -28,8 +28,7 @@
   "bugs": {
     "url": "https://github.com/harvard-lil/portal/issues"
   },
-  "dependencies": {
-  },
+  "dependencies": {},
   "devDependencies": {
     "express": "^4.18.2",
     "standard": "*"
