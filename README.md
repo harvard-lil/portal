@@ -1,5 +1,7 @@
 # Portal
 
+[![npm version](https://badge.fury.io/js/@harvard-lil%2Fportal.svg)](https://badge.fury.io/js/@harvard-lil%2Fportal) [![JavaScript Style Guide](https://img.shields.io/badge/code_style-standard-brightgreen.svg)](https://standardjs.com) [![Linting](https://github.com/harvard-lil/portal/actions/workflows/lint.yml/badge.svg?branch=main)](https://github.com/harvard-lil/portal/actions/workflows/lint.yml) [![Test suite](https://github.com/harvard-lil/portal/actions/workflows/test.yml/badge.svg?branch=main)](https://github.com/harvard-lil/portal/actions/workflows/test.yml)
+
 > 🚧 Work-in-progress 
 
 HTTP proxy implementation using Node.js' [http.createServer](https://nodejs.org/api/http.html#httpcreateserveroptions-requestlistener), currently in use on [@harvard-lil/scoop](https://github.com/harvard-lil/scoop).
