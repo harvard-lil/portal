@@ -4,7 +4,7 @@
 
 > 🚧 Work-in-progress 
 
-HTTP proxy implementation using Node.js' [http.createServer](https://nodejs.org/api/http.html#httpcreateserveroptions-requestlistener), currently in use on [@harvard-lil/scoop](https://github.com/harvard-lil/scoop).
+HTTP proxy implementation using Node.js' [http.createServer](https://nodejs.org/api/http.html#httpcreateserveroptions-requestlistener) to accept connections and [http(s).request](https://nodejs.org/api/http.html#httprequestoptions-callback) to relay them to their destinations. Currently in use on [@harvard-lil/scoop](https://github.com/harvard-lil/scoop).
 
 ## Example
 
