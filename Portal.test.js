@@ -48,28 +48,28 @@ await test('Portal', async (t) => {
 
   await t.test('\'request\' event returns instance of http.IncomingMessage', async () => {
     await runInProxy({}, (resolve, proxy) => {
-      http.get(requestOptions)
       proxy.on('request', (request) => {
         assert.equal(request.constructor, http.IncomingMessage)
         resolve()
       })
+      http.get(requestOptions)
     })
   })
 
   await t.test('\'response\' event returns instances of http.IncomingMessage', async () => {
     await runInProxy({}, (resolve, proxy) => {
-      http.get(requestOptions)
       proxy.on('response', (response, request) => {
         assert.equal(response.constructor, http.IncomingMessage)
         assert.equal(request.constructor, http.IncomingMessage)
         resolve()
       })
+      http.get(requestOptions)
     })
   })
 
   await t.test('requestTransformer modifies the request', async () => {
     const echo = requestOptions.headers.echo
-    const newEcho = 'Hello everybody!'
+    const newEcho = 'hELLO WORLD'
 
     const options = {
       requestTransformer: () => new Transform({
@@ -80,7 +80,6 @@ await test('Portal', async (t) => {
     }
 
     await runInProxy(options, (resolve, proxy) => {
-      http.get(requestOptions)
       proxy.on('response', (response, request) => {
         assert.equal(request.headers.echo, echo)
         response.on('data', data => {
@@ -88,6 +87,35 @@ await test('Portal', async (t) => {
           resolve()
         })
       })
+      http.get(requestOptions)
+    })
+  })
+
+  await t.test('responseTransformer modifies the response', async () => {
+    const echo = requestOptions.headers.echo
+    const newEcho = 'hELLO WORLD'
+
+    const options = {
+      responseTransformer: () => new Transform({
+        transform: (chunk, _encoding, callback) => {
+          callback(null, Buffer.from(chunk.toString().replace(echo, newEcho)))
+        }
+      }),
+    }
+
+    await runInProxy(options, (resolve, proxy) => {
+      proxy.on('response', (_response, request) => {
+        assert.equal(request.headers.echo, echo)
+      })
+
+      http
+        .get(requestOptions)
+        .on('response', response => {
+          response.on('data', data => {
+            assert.equal(data.toString(), newEcho)
+            resolve()
+          })
+        })
     })
   })
 
