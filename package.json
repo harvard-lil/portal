@@ -30,7 +30,6 @@
   },
   "dependencies": {},
   "devDependencies": {
-    "express": "^4.18.2",
     "standard": "*"
   }
 }
