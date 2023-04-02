@@ -14,7 +14,7 @@ const SERVER_HOST = '127.0.0.1'
 const runInProxy = async (options, cb) => {
   const proxy = createServer(options)
   const server = http.createServer((req, res) => {
-    res.writeHead(200, { 'Content-Type': 'text/html' });
+    res.writeHead(200, { 'Content-Type': 'text/html' })
     res.end(req.headers.echo)
   })
 
@@ -81,7 +81,7 @@ await test('requestTransformer modifies the request', async () => {
       transform: (chunk, _encoding, callback) => {
         callback(null, Buffer.from(chunk.toString().replace(echo, newEcho)))
       }
-    }),
+    })
   }
 
   await runInProxy(options, (resolve, proxy) => {
@@ -106,7 +106,7 @@ await test('responseTransformer modifies the response', async () => {
       transform: (chunk, _encoding, callback) => {
         callback(null, Buffer.from(chunk.toString().replace(echo, newEcho)))
       }
-    }),
+    })
   }
 
   await runInProxy(options, (resolve, proxy) => {
