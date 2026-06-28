@@ -129,7 +129,7 @@ function releaseSocket (req) {
     req.agent.createConnection = (...args) => args[0]?.socket
       ? args[0].socket
       : createConnection(...args)
-    req.agent.createSocket(null, { socket, servername: 'bypass' }, () => {})
+    req.agent.createSocket(req, { socket, servername: 'bypass' }, () => {})
   } finally {
     req.agent.createConnection = createConnection
   }
