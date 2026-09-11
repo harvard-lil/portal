@@ -1,26 +1,30 @@
-import * as http from 'http'
-import * as https from 'https'
-import { TLSSocket } from 'tls'
-import { URL } from 'url'
-import { PassThrough } from 'node:stream'
+// Raw HTTP transport with destination authorization; see README.md.
+import * as http from 'node:http'
+import * as https from 'node:https'
+import { TLSSocket } from 'node:tls'
+import { BlockList, isIP } from 'node:net'
+import dns from 'node:dns/promises'
+import { Duplex, PassThrough } from 'node:stream'
+import { once } from 'node:events'
+import { RequestGate } from './RequestGate.js'
+import { ResponseGate } from './ResponseGate.js'
+import { requestUrl as authorityUrl } from './authority.js'
 
 const CONNECT = 'CONNECT'
-const UNKNOWN_PROTOCOL = 'unknown:'
 const RELEASE_SOCKET = 'release-socket'
 const CRLF = '\r\n'
+const tunnelAuthority = Symbol('CONNECT authority')
+const guardedSocket = Symbol('guarded socket')
 
-const httpAgent = new http.Agent({ keepAlive: true })
-const httpsAgent = new https.Agent({ keepAlive: true })
-
-const proxyDefaults = {
-  requestTransformer: (_request) => new PassThrough(),
-  responseTransformer: (_response, _request) => new PassThrough(),
-  clientOptions: (_request) => { return {} },
-  serverOptions: (_request) => { return {} },
-  keepAlive: true
+function guardSocket (socket, proxy) {
+  if (socket[guardedSocket]) return
+  socket[guardedSocket] = true
+  socket.on('error', error => {
+    if (socket.listenerCount('error') === 1) proxy?.emit('error', error, socket)
+  })
 }
 
-const clientDefaults = {
+export const clientDefaults = {
   rejectUnauthorized: false,
   requestCert: false,
   key: '-----BEGIN PRIVATE KEY-----\n' +
@@ -45,47 +49,12 @@ function prepSocket (socket, proxy) {
   if (!socket.mirror) {
     socket.mirror = new PassThrough()
     socket.pipe(socket.mirror)
-    // This is necessary either when the socket has gone back into the agent pool
-    // or in these cases; unclear which
-    // @see {@link https://github.com/nodejs/node/blob/38b6ecc12e9d3458205da8c4c698cf127590c8b6/lib/_http_client.js#L721-L722}
-    // @see {@link https://github.com/nodejs/node/blob/6311de332223e855e7f1ce03b7c920f51f308e95/lib/_http_client.js#L861-L862}
-    socket.on('error', err => {
-      if (socket.listenerCount('error') === 1) {
-        proxy.emit('error', err, socket)
-      }
-    })
+    guardSocket(socket, proxy)
   } else {
-    // Sockets are reused for subsequent requests, so previous pipes must be cleared.
-    // Failure to do so will cause the wrong request object to be passed to the transformers
     socket.mirror.unpipe()
+    socket.responseGate?.destroy()
     socket.mirror.transformer?.unpipe()
-
-    /**
-     * Ensure the socket remains flowing.
-     * The 'upgrade' event will remove http.Server's event listeners and, in the process,
-     * assume that there are no other listeners and set socket.readableFlowing === null even
-     * though the pipe to mirror is still attached
-     * @see {@link https://nodejs.org/api/stream.html#three-states}
-     * @see {@link https://nodejs.org/api/http.html#event-upgrade_1}
-     */
     socket.resume()
-  }
-}
-
-function getServerDefaults (request) {
-  const url = new URL(
-    request.method === CONNECT || request.url.startsWith('/')
-      ? `${UNKNOWN_PROTOCOL}//${request.headers.host || request.url}`
-      : request.url
-  )
-  const protocol = url.protocol === UNKNOWN_PROTOCOL && (request.method === CONNECT || request.socket instanceof TLSSocket)
-    ? 'https:'
-    : 'http:'
-  return {
-    host: url.hostname,
-    servername: url.hostname,
-    port: parseInt(url.port) || (protocol === 'https:' ? 443 : 80),
-    agent: protocol === 'https:' ? httpsAgent : httpAgent
   }
 }
 
@@ -128,147 +97,321 @@ function releaseSocket (req) {
   try {
     req.agent.createConnection = (...args) => args[0]?.socket
       ? args[0].socket
-      : createConnection(...args)
-    req.agent.createSocket(null, { socket, servername: 'bypass' }, () => {})
+      : createConnection.call(req.agent, ...args)
+    req.agent.createSocket(req, { socket, servername: 'bypass' }, () => {})
   } finally {
     req.agent.createConnection = createConnection
   }
 }
 
-async function getServerRequest (clientRequest, serverOptions) {
-  const customOptions = await serverOptions(clientRequest)
-  const options = { ...getServerDefaults(clientRequest), ...customOptions }
-
-  const httpModule = options.agent === httpsAgent ? https : http
-  return httpModule.request(options)
+/** Return the HTTP URL represented by a parsed request without changing its bytes. */
+export function requestUrl (request) {
+  const target = authorityUrl(request, {
+    secure: request.socket instanceof TLSSocket,
+    tunnelAuthority: request.socket[tunnelAuthority]
+  })
+  if (!['http:', 'https:'].includes(new URL(target).protocol)) throw new Error('Only HTTP(S) destinations are permitted')
+  return target
 }
 
-function getResponseHandler (event, proxy, clientRequest, responseTransformer) {
-  return async (serverResponse, _, head) => {
-    // Early exit if this is a fabricated response to get Node to release the socket
-    if (serverResponse.headers.upgrade === RELEASE_SOCKET) return
-
-    const { socket: serverSocket } = serverResponse
-    prepSocket(serverSocket, proxy)
-
-    // Emit a response event on the http.Server instance to allow a similar interface as server.on('request')
-    proxy.emit(event, serverResponse, clientRequest)
-
-    /**
-     * req.emit('finish') be called to release the socket back into the agent pool.
-     * Needed since we never call `req.end()` and instead just pipe data through the socket.
-     * Node's `res.on('end')` handler will set `req._ended = true` which the
-     * `req.on('finish')` handler uses to determine whether to send the socket back to the pool.
-     * @see {@link https://github.com/nodejs/node/blob/c5881458106487f80d31513096b4d0baa88828b8/lib/_http_client.js#L748}
-     * @see {@link https://github.com/nodejs/node/blob/c5881458106487f80d31513096b4d0baa88828b8/lib/_http_client.js#L786}
-     *
-     * NOTE: req will be undefined for 'upgrade' requests which is fine
-     * since the socket shouldn't be returned to the pool in that event, anyway
-     */
-    serverResponse.on('end', () => serverResponse.req?.emit('finish'))
-
-    // On response, forward the original server response on to the client.
-    // TODO: figure out why clientSocket doesn't play well with backpressure hence the need for on('data') instead of pipe
-    serverSocket.mirror.transformer = await responseTransformer(serverResponse, clientRequest)
-    serverSocket.mirror.pipe(serverSocket.mirror.transformer).on('data', data => clientRequest.socket.write(data))
-
-    // response must be fully consumed else response.socket listeners won't get all of the chunks.
-    // @see {@link https://nodejs.org/api/http.html#class-httpclientrequest}
-    serverResponse.resume()
+// Default routing permits every valid HTTP(S) destination, with one resolved
+// address per request and no second DNS lookup when opening the connection.
+async function authorizeDestination (request, signal) {
+  signal.throwIfAborted()
+  const url = new URL(requestUrl(request))
+  const hostname = url.hostname.replace(/^\[|\]$/g, '')
+  const literalFamily = isIP(hostname)
+  const { address, family } = literalFamily
+    ? { address: hostname, family: literalFamily }
+    : await dns.lookup(hostname)
+  signal.throwIfAborted()
+  return {
+    url,
+    hostname,
+    address,
+    family,
+    lookup: (_hostname, options, callback) => queueMicrotask(() => {
+      if (signal.aborted) callback(signal.reason)
+      else if (options?.all) callback(null, [{ address, family }])
+      else callback(null, address, family)
+    })
   }
 }
 
-function getRequestHandler (proxy, clientOptions, serverOptions, requestTransformer, responseTransformer) {
-  return async (clientRequest, _, head) => {
-    const { socket: clientSocket } = clientRequest
-    prepSocket(clientSocket, proxy)
-
-    const serverRequest = await getServerRequest(clientRequest, serverOptions)
-
-    serverRequest
-      .on('error', err => proxy.emit('error', err, serverRequest, clientRequest))
-      .on('socket', async serverSocket => {
-        prepSocket(serverSocket, proxy)
-
-        const onSocketConnect = async () => {
-          proxy.emit('connected', serverSocket, clientRequest)
-          if (serverSocket.destroyed) return // serverSocket may be destroyed via a 'connected' event listener
-          if (clientRequest.method === CONNECT) {
-            // Replace old net.Socket with new tls.Socket and attach parser and event listeners
-            // @see {@link https://nodejs.org/api/http.html#event-connection}
-            const options = await clientOptions(clientRequest)
-            proxy.emit('connection', new TLSSocket(clientSocket, { ...clientDefaults, ...options, isServer: true }))
-
-            // Let the client know we've made the connection @see {@link https://reqbin.com/Article/HttpConnect}
-            clientSocket.write(['HTTP/1.1 200 Connection Established', CRLF].join(CRLF))
-            serverSocket.write(head)
-            releaseSocket(serverRequest)
-          } else {
-            clientSocket.mirror.transformer = await requestTransformer(clientRequest)
-            clientSocket.mirror.pipe(clientSocket.mirror.transformer).pipe(serverSocket, { end: false })
-          }
-        }
-
-        if (serverRequest.reusedSocket) await onSocketConnect()
-        else serverSocket.on('connect', onSocketConnect)
-      })
-      .on('upgrade', getResponseHandler('upgrade-client', proxy, clientRequest, responseTransformer))
-      .on('connect', getResponseHandler('connect', proxy, clientRequest, responseTransformer))
-      .on('continue', getResponseHandler('continue', proxy, clientRequest, responseTransformer))
-      .on('information', getResponseHandler('information', proxy, clientRequest, responseTransformer))
-      .on('response', getResponseHandler('response', proxy, clientRequest, responseTransformer))
-    // Ensure the entire request can be consumed. This isn't documented but is here
-    // on the suspicion that it functions similarly to response, as documented above.
-    clientRequest.resume()
+function verifyDestination (socket, destination) {
+  const addresses = new BlockList()
+  addresses.addAddress(destination.address, isIP(destination.address) === 6 ? 'ipv6' : 'ipv4')
+  const family = isIP(socket.remoteAddress || '')
+  if (!family || !addresses.check(socket.remoteAddress, family === 6 ? 'ipv6' : 'ipv4')) {
+    throw new Error('Connected peer differs from approved destination')
   }
 }
 
-function getConnectionHandler (proxy) {
-  return (socket) => prepSocket(socket, proxy)
-}
-
 /**
- * Removes any remaining sockets still open due to keep-alive
+ * Retain Portal's parsed-event/raw-byte interface. authorizeRequest is awaited
+ * before http.request can create or reuse an upstream socket. Each connection's
+ * RequestGate releases only the exact byte range of that approved message.
  */
-function closeHandler () {
-  httpAgent.destroy()
-  httpsAgent.destroy()
-}
-
-/**
- * Creates a new proxy using the provided options.
- * Returns an instance of http.Server which can be started
- * using the standard listen() method.
- *
- * @param {?object} options
- * @param {?(request:http.IncomingMessage) => stream.Duplex} options.requestTransformer - A function which receives the parsed request headers and returns a duplex stream through which the request chunks will be piped before being passed along to the receiving server. Most likely you'll want to return a custom stream.Transform instance. stream.PassThrough is used by default.
- * @param {?(response:http.IncomingMessage, request:http.IncomingMessage) => stream.Duplex} options.responseTransformer - A function which receives the parsed response and request headers and returns a duplex stream through which the response chunks will be piped before being passed along to the client. Most likely you'll want to return a custom stream.Transform instance. stream.PassThrough is used by default.
- * @param {?(request:http.IncomingMessage) => Promise<object>|object} clientOptions - A function which receives the parsed request headers and returns options to be fed into the creation of a new client tls.TLSSocket. Primarily useful to generate a key and cert. Optionally can return a Promise. @see {@link https://nodejs.org/api/tls.html#class-tlstlssocket}
-  * @param {?(request:http.IncomingMessage) => Promise<object>|object} serverOptions - A function which receives the parsed request headers and returns options to be fed into the request to the destination server. Primarily useful for setting SSL flags. Optionally can return a Promise. @see {@link https://nodejs.org/api/https.html#httpsrequestoptions-callback}
- * @returns {http.Server}
- */
-export function createServer (options) {
-  // Filter options and backfill with defaults.
+export function createServer (options = {}) {
   const {
-    requestTransformer,
-    responseTransformer,
-    clientOptions,
-    serverOptions,
-    ...passalongOptions
-  } = { ...proxyDefaults, ...options }
+    authorizeRequest = authorizeDestination,
+    verifyPeer = verifyDestination,
+    requestTransformer = () => new PassThrough(),
+    responseTransformer = () => new PassThrough(),
+    clientOptions = () => ({}),
+    serverOptions = () => ({}),
+    ...serverSettings
+  } = options
+  if (typeof authorizeRequest !== 'function' || typeof verifyPeer !== 'function') {
+    throw new TypeError('authorizeRequest and verifyPeer must be functions')
+  }
+  const agents = { 'http:': new http.Agent({ keepAlive: true }), 'https:': new https.Agent({ keepAlive: true }) }
+  // DNS changes must not reuse a socket authorized for another address. Agent
+  // names retain the original hostname (and HTTPS settings) as well as the pin.
+  for (const agent of Object.values(agents)) {
+    const createConnection = agent.createConnection
+    agent.createConnection = function (...args) {
+      const socket = createConnection.apply(this, args)
+      // Pinned lookup can fail before ClientRequest emits its socket event.
+      // Keep an error listener throughout creation, pooling and teardown.
+      guardSocket(socket, proxy)
+      return socket
+    }
+    const getName = agent.getName
+    agent.getName = function (settings) {
+      return `${getName.call(this, settings)}:${settings.approvedAddress || ''}`
+    }
+  }
+  const sockets = new Set()
+  const proxy = http.createServer(serverSettings)
+  // Framing metadata must include headers near the end of a permitted header
+  // block. Retain Node's byte-size limit, but do not silently omit field pairs.
+  proxy.maxHeadersCount = 0
+  const track = socket => {
+    if (sockets.has(socket)) return
+    sockets.add(socket)
+    socket.once('close', () => sockets.delete(socket))
+  }
+  const fail = (error, request, serverRequest) => {
+    serverRequest?.destroy()
+    const socket = request?.socket
+    socket?.requestGate?.destroy()
+    proxy.emit('error', error, serverRequest, request)
+    // The caller may emit an error response, but must never continue forwarding.
+    if (socket && !socket.destroyed) socket.end()
+  }
 
-  const proxy = http.createServer(passalongOptions)
-  const connectionHandler = getConnectionHandler(proxy)
-  const requestHandler = getRequestHandler(proxy, clientOptions, serverOptions, requestTransformer, responseTransformer)
+  async function openRequest (request, signal) {
+    requestUrl(request) // Authority checks apply even when a custom policy does not parse the URL.
+    const destination = await authorizeRequest(request, signal)
+    signal.throwIfAborted()
+    const customOptions = await serverOptions(request)
+    signal.throwIfAborted()
+    if (request.socket.destroyed) throw new Error('Client connection closed')
+    destination.signal?.throwIfAborted()
+    const protocol = destination.url.protocol
+    const module = protocol === 'https:' ? https : http
+    const port = destination.url.port === '' ? (protocol === 'https:' ? 443 : 80) : Number(destination.url.port)
+    if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('Invalid destination port')
+    const upstream = module.request({
+      ...customOptions,
+      method: request.method === CONNECT ? 'GET' : request.method,
+      host: destination.hostname,
+      port,
+      servername: customOptions.servername ?? (isIP(destination.hostname) ? '' : destination.hostname),
+      agent: agents[protocol],
+      lookup: destination.lookup,
+      family: destination.family,
+      approvedAddress: destination.address
+    })
+    let finishResponse
+    let rejectResponse
+    const responseDone = new Promise((resolve, reject) => { finishResponse = resolve; rejectResponse = reject })
+    // A response can fail before the gate finishes sending a request body.
+    responseDone.catch(() => {})
+    upstream.maxHeadersCount = 0
+    let pipeReady
+    let responseGate
+    let active
+    let openReject
+    let responseStarted = false
+    let stopped = false
+    const stop = error => {
+      if (stopped) return
+      stopped = true
+      upstream.socket?.destroy()
+      // Once raw response bytes have begun, a synthetic error response would
+      // become part of that response body or an unrequested second message.
+      if (responseStarted) request.socket.destroy()
+      responseGate?.destroy()
+      rejectResponse(error)
+      openReject?.(error)
+      fail(error, request, upstream)
+    }
+    const aborted = () => upstream.destroy(new Error('Client connection closed'))
+    signal.addEventListener('abort', aborted, { once: true })
+    destination.signal?.addEventListener('abort', aborted, { once: true })
+    upstream.on('close', () => {
+      signal.removeEventListener('abort', aborted)
+      destination.signal?.removeEventListener('abort', aborted)
+    })
+    upstream.on('error', stop)
 
-  proxy
-    .on('connection', connectionHandler)
-    .on('close', closeHandler)
-    .on('connect', requestHandler)
-    .on('upgrade', requestHandler)
-    .on('checkContinue', requestHandler)
-    .on('checkExpectation', requestHandler)
-    .on('request', requestHandler)
+    const startResponse = (response, upgrade = false) => {
+      if (!active) throw new Error('Response before peer verification and request setup')
+      responseGate.addResponse(response, upgrade)
+      if (!pipeReady) {
+        pipeReady = Promise.resolve(responseTransformer(response, request)).then(transformer => {
+          upstream.socket.mirror.transformer = transformer
+          transformer.on('error', stop)
+          transformer.pipe(request.socket, { end: false })
+          return transformer
+        })
+        pipeReady.catch(stop)
+      }
+    }
+    upstream.on('information', response => {
+      try { startResponse(response); proxy.emit('information', response, request) } catch (error) { stop(error) }
+    })
+    upstream.on('continue', () => proxy.emit('continue', request))
+    upstream.on('response', response => {
+      try { startResponse(response) } catch (error) { stop(error); return }
+      proxy.emit('response', response, request)
+      response.on('error', stop)
+      response.on('end', () => {
+        responseGate.done.then(async () => {
+          if (signal.aborted) return
+          const transformer = await pipeReady
+          const flushed = once(transformer, 'end', { signal })
+          transformer.end()
+          await flushed
+          active.close = responseGate.closeDelimited || /(?:^|,)\s*close\s*(?:,|$)/i.test(response.headers.connection || '')
+          // Do not return the socket to Node's pool until the raw byte boundary
+          // agrees with its parsed end, including any already queued bytes.
+          const freed = upstream.shouldKeepAlive ? once(upstream.socket, 'free', { signal }) : null
+          response.req?.emit('finish')
+          if (freed) await freed
+          finishResponse()
+        }).catch(stop)
+      })
+      response.resume()
+    })
+    upstream.on('upgrade', (response, socket, head) => {
+      if (response.headers.upgrade === RELEASE_SOCKET) return
+      try { startResponse(response, true) } catch (error) { stop(error); return }
+      if (!request.upgrade) { stop(new Error('Unsolicited protocol upgrade')); return }
+      active.upgraded = true
+      proxy.emit('upgrade-client', response, request)
+      socket.resume()
+      responseGate.done.then(finishResponse, stop)
+    })
 
+    return await new Promise((resolve, reject) => {
+      openReject = reject
+      upstream.on('socket', socket => {
+        track(socket)
+        prepSocket(socket, proxy)
+        if (request.method !== CONNECT) {
+          responseGate = new ResponseGate(request, async bytes => {
+            const transformer = await pipeReady
+            if (!transformer || signal.aborted) throw new Error('Response stream is unavailable')
+            responseStarted = true
+            await new Promise((resolve, reject) => transformer.write(bytes, error => error ? reject(error) : resolve()))
+          })
+          socket.responseGate = responseGate
+          responseGate.on('error', stop)
+          socket.mirror.pipe(responseGate)
+        }
+        const connected = async () => {
+          signal.throwIfAborted()
+          await verifyPeer(socket, destination)
+          signal.throwIfAborted()
+          destination.signal?.throwIfAborted()
+          proxy.emit('connected', socket, request)
+          if (socket.destroyed) throw new Error('Upstream connection closed')
+          if (request.method === CONNECT) {
+            const tlsOptions = await clientOptions(request)
+            signal.throwIfAborted()
+            // The outer gate supplies all post-CONNECT bytes to this transport,
+            // including a ClientHello arriving in the same TCP read as CONNECT.
+            const transport = new Duplex({
+              read () {},
+              write (data, encoding, callback) { request.socket.write(data, encoding, callback) },
+              final (callback) { request.socket.end(callback) },
+              destroy (error, callback) { request.socket.destroy(); callback(error) }
+            })
+            const local = new TLSSocket(transport, { ...clientDefaults, ...tlsOptions, isServer: true })
+            local[tunnelAuthority] = destination.url.host
+            local.on('error', error => fail(error, request, upstream))
+            request.socket.once('close', () => local.destroy())
+            proxy.emit('connection', local)
+            request.socket.write(['HTTP/1.1 200 Connection Established', CRLF].join(CRLF))
+            releaseSocket(upstream)
+            active = {
+              request,
+              tunnel: true,
+              writer: new PassThrough(),
+              destroy () { local.destroy(); socket.destroy() }
+            }
+            active.writer.on('data', data => transport.push(data))
+          } else {
+            const writer = await requestTransformer(request)
+            signal.throwIfAborted()
+            writer.on('error', stop)
+            writer.pipe(socket, { end: false })
+            active = {
+              request,
+              writer,
+              upgraded: false,
+              destroy () { writer.destroy(); socket.destroy() },
+              async finish () {
+                if (!request.upgrade) {
+                  const finished = once(writer, 'finish', { signal })
+                  writer.end()
+                  await finished
+                }
+                await responseDone
+                if (request.upgrade && !this.upgraded) writer.end()
+              }
+            }
+          }
+          resolve(active)
+        }
+        if (upstream.reusedSocket) connected().catch(stop)
+        else socket.once('connect', () => connected().catch(stop))
+      })
+    })
+  }
+
+  proxy.on('connection', socket => {
+    track(socket)
+    prepSocket(socket, proxy)
+    const gate = new RequestGate(openRequest)
+    socket.requestGate = gate
+    socket.mirror.pipe(gate)
+    gate.on('error', error => fail(error, gate.currentRequest || gate.requests[0]))
+    socket.once('close', () => gate.destroy())
+  })
+  const enqueue = request => {
+    request.socket.requestGate.addRequest(request)
+    // Upgrade/CONNECT parsing detaches Node's parser and clears flowing state.
+    request.socket.resume()
+    request.resume()
+  }
+  proxy.on('request', enqueue)
+  proxy.on('connect', enqueue)
+  proxy.on('upgrade', enqueue)
+  proxy.on('checkContinue', enqueue)
+  proxy.on('checkExpectation', enqueue)
+  proxy.on('clientError', (error, socket) => {
+    socket.requestGate?.destroy()
+    proxy.emit('error', error, null, { socket })
+    socket.end()
+  })
+  proxy.destroyConnections = () => {
+    for (const socket of sockets) socket.destroy()
+    for (const agent of Object.values(agents)) agent.destroy()
+  }
+  proxy.on('close', proxy.destroyConnections)
   return proxy
 }

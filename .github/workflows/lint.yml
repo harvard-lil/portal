@@ -13,7 +13,7 @@ jobs:
 
     strategy:
       matrix:
-        node: [ 20 ]
+        node: [ 22, 24, 26 ]
 
     name: Node.js ${{ matrix.node }}
 
@@ -24,7 +24,7 @@ jobs:
         node-version: ${{ matrix.node }}
 
     - name: Install dependencies
-      run: npm install
+      run: npm ci
 
     - name: Run linter
       run: npm run lint
