@@ -1,13 +1,14 @@
 import { Writable } from 'node:stream'
-import { maxHeaderSize } from 'node:http'
+import { maxHeaderSize as defaultMaxHeaderSize } from 'node:http'
 import { headerEnd, messageFraming, validateHeaderLines, chunkSize } from './framing.js'
 
 /** Forward the original bytes of one parsed response, including its 1xx prefix. */
 export class ResponseGate extends Writable {
-  constructor (request, send) {
+  constructor (request, send, maxHeaderSize = defaultMaxHeaderSize) {
     super()
     this.request = request
     this.send = send
+    this.maxHeaderSize = maxHeaderSize
     this.messages = []
     this.pending = Buffer.alloc(0)
     this.state = 'headers'
@@ -50,7 +51,7 @@ export class ResponseGate extends Writable {
         this.pending = Buffer.alloc(0)
         await this.send(bytes)
       } else if (this.state === 'headers') {
-        const end = headerEnd(this.pending)
+        const end = headerEnd(this.pending, false, this.maxHeaderSize)
         if (end < 0) return
         // On a reused socket the mirror's data listener precedes Node's new
         // parser listener. Let that same data event finish before comparing.
@@ -93,12 +94,12 @@ export class ResponseGate extends Writable {
       } else if (this.state === 'chunk-size' || this.state === 'chunk-end') {
         const end = this.pending.indexOf(10)
         if (end < 0) {
-          if (this.pending.length > (this.state === 'chunk-end' ? 1 : maxHeaderSize)) throw new Error('Invalid chunk framing')
+          if (this.pending.length > (this.state === 'chunk-end' ? 1 : this.maxHeaderSize)) throw new Error('Invalid chunk framing')
           return
         }
         const line = this.pending.subarray(0, end + 1)
         if (this.state === 'chunk-size') {
-          this.remaining = chunkSize(line)
+          this.remaining = chunkSize(line, this.maxHeaderSize)
           this.state = this.remaining ? 'chunk-body' : 'trailers'
         } else {
           if (!line.equals(Buffer.from('\r\n'))) throw new Error('Invalid chunk terminator')
@@ -107,7 +108,7 @@ export class ResponseGate extends Writable {
         this.pending = this.pending.subarray(end + 1)
         await this.send(line)
       } else if (this.state === 'trailers') {
-        const end = headerEnd(this.pending, true)
+        const end = headerEnd(this.pending, true, this.maxHeaderSize)
         if (end < 0) return
         const trailers = this.pending.subarray(0, end)
         validateHeaderLines(trailers, true)

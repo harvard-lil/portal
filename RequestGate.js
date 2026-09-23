@@ -1,6 +1,6 @@
 import { Writable } from 'node:stream'
 import { once } from 'node:events'
-import { maxHeaderSize } from 'node:http'
+import { maxHeaderSize as defaultMaxHeaderSize } from 'node:http'
 import { headerEnd, messageFraming, validateHeaderLines, chunkSize } from './framing.js'
 
 /**
@@ -9,9 +9,10 @@ import { headerEnd, messageFraming, validateHeaderLines, chunkSize } from './fra
  * One response must finish before the next request is released upstream.
  */
 export class RequestGate extends Writable {
-  constructor (openRequest) {
+  constructor (openRequest, maxHeaderSize = defaultMaxHeaderSize) {
     super()
     this.openRequest = openRequest
+    this.maxHeaderSize = maxHeaderSize
     this.requests = []
     this.pending = Buffer.alloc(0)
     this.state = 'headers'
@@ -67,12 +68,12 @@ export class RequestGate extends Writable {
         return
       }
       if (this.state === 'headers') {
-        const end = headerEnd(this.pending)
+        const end = headerEnd(this.pending, false, this.maxHeaderSize)
         if (end < 0) {
-          if (this.pending.length > maxHeaderSize) throw new Error('Request header exceeds parser limit')
+          if (this.pending.length > this.maxHeaderSize) throw new Error('Request header exceeds parser limit')
           return
         }
-        if (end > maxHeaderSize) throw new Error('Request header exceeds parser limit')
+        if (end > this.maxHeaderSize) throw new Error('Request header exceeds parser limit')
         const request = this.requests.shift()
         if (!request) throw new Error('Request framing disagrees with HTTP parser')
         this.currentRequest = request
@@ -107,11 +108,11 @@ export class RequestGate extends Writable {
       } else if (this.state === 'chunk-size') {
         const end = this.pending.indexOf(10)
         if (end < 0) {
-          if (this.pending.length > maxHeaderSize) throw new Error('Chunk line exceeds parser limit')
+          if (this.pending.length > this.maxHeaderSize) throw new Error('Chunk line exceeds parser limit')
           return
         }
         const line = this.pending.subarray(0, end + 1)
-        this.remaining = chunkSize(line)
+        this.remaining = chunkSize(line, this.maxHeaderSize)
         await this.send(line)
         this.pending = this.pending.subarray(end + 1)
         this.state = this.remaining ? 'chunk-body' : 'trailers'
@@ -127,12 +128,12 @@ export class RequestGate extends Writable {
         this.pending = this.pending.subarray(end + 1)
         this.state = 'chunk-size'
       } else if (this.state === 'trailers') {
-        const end = headerEnd(this.pending, true)
+        const end = headerEnd(this.pending, true, this.maxHeaderSize)
         if (end < 0) {
-          if (this.pending.length > maxHeaderSize) throw new Error('Trailers exceed parser limit')
+          if (this.pending.length > this.maxHeaderSize) throw new Error('Trailers exceed parser limit')
           return
         }
-        if (end > maxHeaderSize) throw new Error('Trailers exceed parser limit')
+        if (end > this.maxHeaderSize) throw new Error('Trailers exceed parser limit')
         validateHeaderLines(this.pending.subarray(0, end), true)
         await this.send(this.pending.subarray(0, end))
         this.pending = this.pending.subarray(end)

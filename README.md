@@ -66,6 +66,7 @@ Portal pairs raw request and response boundaries with Node's parsed metadata. Wi
 
 - Request-target, Host and CONNECT authorities must agree. Malformed authorities and destination port zero are rejected. Inner CONNECT requests must retain the tunnel authority; an approved TLS preflight precedes their authorization.
 - Framing requires CRLF and an unambiguous Content-Length or `chunked` Transfer-Encoding. Header-byte limits apply to incomplete headers, chunk-size lines and trailers; the header-count cutoff is disabled so parsed fields are not silently omitted.
+- The `maxHeaderSize` option of `createServer` (default: [`http.maxHeaderSize`](https://nodejs.org/api/http.html#httpmaxheadersize), 16 KiB unless `--max-http-header-size` is set) is the byte limit for request headers, upstream response headers, chunk-size lines and trailers. Portal applies it to upstream requests itself; a `maxHeaderSize` returned by `serverOptions` is ignored.
 - Pipelined requests are authorized and forwarded sequentially, with connection reuse after both parsed and raw response completion. Servers that wait for a later pipelined request before answering an earlier one can stall.
 - Informational responses precede the final response. Bodyless and close-delimited responses follow their HTTP semantics. Surplus final-response bytes close the upstream connection.
 - Upgrade handshakes are checked; opaque client bytes wait for an upstream 101. URL policy does not inspect messages within an upgraded protocol. Declined or unsolicited upgrades close the downstream connection.
