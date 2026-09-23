@@ -27,7 +27,7 @@ export function messageFraming (message) {
 }
 
 // Node's parsed events supply metadata; these checks delimit original bytes.
-export function headerEnd (buffer, trailers = false) {
+export function headerEnd (buffer, trailers = false, limit = maxHeaderSize) {
   let start = 0
   let started = trailers
   while (start < buffer.length) {
@@ -36,13 +36,13 @@ export function headerEnd (buffer, trailers = false) {
     if (end === start || buffer[end - 1] !== 13) throw new Error('HTTP framing requires CRLF')
     const empty = end === start + 1
     if (empty && started) {
-      if (end + 1 > maxHeaderSize) throw new Error('Header block exceeds parser limit')
+      if (end + 1 > limit) throw new Error('Header block exceeds parser limit')
       return end + 1
     }
     if (!empty) started = true
     start = end + 1
   }
-  if (buffer.length > maxHeaderSize) throw new Error('Header block exceeds parser limit')
+  if (buffer.length > limit) throw new Error('Header block exceeds parser limit')
   return -1
 }
 
@@ -60,8 +60,8 @@ export function validateHeaderLines (bytes, trailers = false) {
   }
 }
 
-export function chunkSize (line) {
+export function chunkSize (line, limit = maxHeaderSize) {
   const size = /^([0-9a-f]+)(?:;[^\r\n]*)?\r\n$/i.exec(line.toString('latin1'))
-  if (!size || line.length > maxHeaderSize) throw new Error('Invalid chunk framing')
+  if (!size || line.length > limit) throw new Error('Invalid chunk framing')
   return BigInt('0x' + size[1])
 }

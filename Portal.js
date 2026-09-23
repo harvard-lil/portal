@@ -184,6 +184,9 @@ export function createServer (options = {}) {
   }
   const sockets = new Set()
   const proxy = http.createServer(serverSettings)
+  // One byte limit governs downstream parsing, upstream parsing and the raw
+  // framing gates, so no stage accepts a header block another rejects.
+  const maxHeaderSize = serverSettings.maxHeaderSize ?? http.maxHeaderSize
   // Framing metadata must include headers near the end of a permitted header
   // block. Retain Node's byte-size limit, but do not silently omit field pairs.
   proxy.maxHeadersCount = 0
@@ -222,7 +225,8 @@ export function createServer (options = {}) {
       agent: agents[protocol],
       lookup: destination.lookup,
       family: destination.family,
-      approvedAddress: destination.address
+      approvedAddress: destination.address,
+      maxHeaderSize
     })
     let finishResponse
     let rejectResponse
@@ -317,7 +321,7 @@ export function createServer (options = {}) {
             if (!transformer || signal.aborted) throw new Error('Response stream is unavailable')
             responseStarted = true
             await new Promise((resolve, reject) => transformer.write(bytes, error => error ? reject(error) : resolve()))
-          })
+          }, maxHeaderSize)
           socket.responseGate = responseGate
           responseGate.on('error', stop)
           socket.mirror.pipe(responseGate)
@@ -386,7 +390,7 @@ export function createServer (options = {}) {
   proxy.on('connection', socket => {
     track(socket)
     prepSocket(socket, proxy)
-    const gate = new RequestGate(openRequest)
+    const gate = new RequestGate(openRequest, maxHeaderSize)
     socket.requestGate = gate
     socket.mirror.pipe(gate)
     gate.on('error', error => fail(error, gate.currentRequest || gate.requests[0]))

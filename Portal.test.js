@@ -734,3 +734,32 @@ test('authority validation applies before a custom authorization callback', asyn
   assert.equal(f.connections, 0)
   assert.ok(f.errors.some(error => error.message === 'Host authority differs from absolute-form target'))
 })
+
+test('maxHeaderSize applies to upstream responses and framing gates alike', async t => {
+  const big = Buffer.from(`HTTP/1.1 200 OK\r\nX-Big: ${'x'.repeat(20000)}\r\nContent-Length: 3\r\n\r\nabc`)
+  const handle = (socket, bytes) => { if (bytes.includes('\r\n\r\n')) socket.write(big) }
+  const complete = bytes => bytes.includes('\r\n\r\nabc')
+
+  const limited = await fixture(t, { handle })
+  const rejected = await client(t, limited.proxy, complete, socket => socket.write(request(limited.url)))
+  assert.ok(!rejected.includes('X-Big'))
+  assert.ok(limited.errors.some(error => error.code === 'HPE_HEADER_OVERFLOW'))
+
+  const raised = await fixture(t, { handle, portalOptions: { maxHeaderSize: 32768 } })
+  const accepted = await client(t, raised.proxy, complete, socket => socket.write(request(raised.url)))
+  assert.deepEqual(accepted, big)
+  assert.deepEqual(Buffer.concat(raised.responseRaw), big)
+  assert.deepEqual(raised.errors, [])
+})
+
+test('maxHeaderSize applies to downstream request headers', async t => {
+  const extra = `X-Big: ${'x'.repeat(20000)}\r\n`
+  const limited = await fixture(t)
+  await client(t, limited.proxy, bytes => bytes.includes('\r\n\r\n'), socket => socket.write(request(limited.url, '/', extra)))
+  assert.equal(limited.connections, 0)
+
+  const raised = await fixture(t, { portalOptions: { maxHeaderSize: 32768 } })
+  const accepted = await client(t, raised.proxy, bytes => bytes.includes('abc'), socket => socket.write(request(raised.url, '/', extra)))
+  assert.deepEqual(accepted, response)
+  assert.equal(Buffer.concat(raised.received).toString(), request(raised.url, '/', extra))
+})
